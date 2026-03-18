@@ -305,12 +305,6 @@ export default function Game() {
       s.vampiricKillTrack += 1;
       grantAbility(s.score);
 
-      if (s.abilities.has("vampiric") && s.vampiricKillTrack >= 10) {
-        s.vampiricKillTrack = 0;
-        s.hp = Math.min(s.maxHp, s.hp + 2);
-        s.damageNums.push({ x: s.player.x, y: s.player.y - 40, vy: -2, life: 60, text: "+2 HP", color: "#c084fc" });
-        setUiHp(s.hp);
-      }
       if (s.abilities.has("chain_lightning")) {
         const nearby = s.mobs.filter(m => !m.dying && m.id !== mob.id)
           .sort((a, b) => Math.hypot(a.x-mob.x,a.y-mob.y) - Math.hypot(b.x-mob.x,b.y-mob.y)).slice(0, 3);
