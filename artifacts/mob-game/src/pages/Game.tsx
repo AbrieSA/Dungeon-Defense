@@ -2,12 +2,12 @@ import { useEffect, useRef, useState, useCallback } from "react";
 
 const CANVAS_WIDTH = 900;
 const CANVAS_HEIGHT = 650;
-const BASE_PLAYER_SPEED = 3.5;
+const BASE_PLAYER_SPEED = 1.75;
 const PLAYER_RADIUS = 16;
 const MOB_RADIUS = 14;
 const BASE_SWORD_RANGE = 80;
 const BASE_SWORD_ARC = Math.PI / 3;
-const MOB_SPEED_BASE = 1.2;
+const MOB_SPEED_BASE = 0.6;
 const MOB_SPAWN_INTERVAL = 1500;
 const JOYSTICK_MAX_DIST = 52;
 
@@ -29,7 +29,7 @@ const ABILITY_LIST: { id: string; name: string; icon: string; desc: string; kill
 ];
 
 interface Mob { id: number; x: number; y: number; hp: number; maxHp: number; dying: boolean; dyingTimer: number; frozen: number; }
-interface SwordSwing { angle: number; progress: number; duration: number; hitIds: Set<number>; phase: number; }
+interface SwordSwing { angle: number; progress: number; duration: number; hitIds: Set<number>; phase: number; dir: 1 | -1; }
 interface Particle { x: number; y: number; vx: number; vy: number; life: number; maxLife: number; color: string; size: number; }
 interface DamageNumber { x: number; y: number; vy: number; life: number; text: string; color?: string; }
 interface FireTrail { x: number; y: number; life: number; maxLife: number; radius: number; }
@@ -93,6 +93,7 @@ export default function Game() {
     abilityNotif: null as AbilityNotif | null,
     whirlwindTimer: 0, vampiricKillTrack: 0,
     moving: false, playerVx: 0, playerVy: 0,
+    swingDir: 1 as (1 | -1),
   });
 
   const animRef = useRef<number>(0);
@@ -131,6 +132,7 @@ export default function Game() {
       wave: 1, waveTimer: 0, gameTime: 0, invincible: 0,
       abilities: new Set<string>(),
       abilityNotif: null, whirlwindTimer: 0, vampiricKillTrack: 0, moving: false,
+      swingDir: 1 as (1 | -1),
     });
     joystickRef.current = { active: false, touchId: -1, screenBX: 0, screenBY: 0, dx: 0, dy: 0 };
     mobIdCounter = 0;
@@ -142,7 +144,9 @@ export default function Game() {
   function triggerSwing(angle: number, phase: number) {
     const s = stateRef.current;
     const dur = s.abilities.has("swift_strikes") ? 160 : 300;
-    s.sword = { angle, progress: 0, duration: dur, hitIds: new Set(), phase };
+    // Flip direction each swing (phase 0 only — double-strike follows same dir)
+    if (phase === 0) s.swingDir = s.swingDir === 1 ? -1 : 1;
+    s.sword = { angle, progress: 0, duration: dur, hitIds: new Set(), phase, dir: s.swingDir };
   }
 
   // Touch + mouse event wiring
@@ -351,13 +355,15 @@ export default function Game() {
 
     function processSwordHits(s: typeof stateRef.current) {
       if (!s.sword) return;
-      const { angle, progress, hitIds } = s.sword;
+      const { angle, progress, hitIds, dir } = s.sword;
       const swordRange = BASE_SWORD_RANGE * (s.abilities.has("giant_sword") ? 1.75 : 1);
       let arcHalf = BASE_SWORD_ARC;
       if (s.abilities.has("wide_slash")) arcHalf *= 2;
       if (s.abilities.has("berserker")) arcHalf *= 1.5;
-      const startAngle = angle - arcHalf;
-      const currentAngle = startAngle + progress * arcHalf * 2;
+      // dir: 1 = swing left-to-right (angle-arcHalf → angle+arcHalf), -1 = opposite
+      const currentAngle = dir === 1
+        ? (angle - arcHalf) + progress * arcHalf * 2
+        : (angle + arcHalf) - progress * arcHalf * 2;
 
       s.mobs.forEach(mob => {
         if (mob.dying || hitIds.has(mob.id)) return;
@@ -680,28 +686,94 @@ export default function Game() {
     s.mobs.forEach(mob => drawMob(ctx, mob, ts));
 
     if (s.sword !== null) {
-      const { angle, progress } = s.sword;
+      const { angle, progress, dir } = s.sword;
       const swordRange = BASE_SWORD_RANGE * (s.abilities.has("giant_sword") ? 1.75 : 1);
       let arcHalf = BASE_SWORD_ARC;
       if (s.abilities.has("wide_slash")) arcHalf *= 2;
       if (s.abilities.has("berserker")) arcHalf *= 1.5;
-      const startAngle = angle - arcHalf;
+      const startAng = dir === 1 ? angle - arcHalf : angle + arcHalf;
+      const endAng   = dir === 1 ? angle + arcHalf : angle - arcHalf;
+      const currentAng = dir === 1
+        ? (angle - arcHalf) + progress * arcHalf * 2
+        : (angle + arcHalf) - progress * arcHalf * 2;
       const colors = getSwordColors(s.abilities);
+      const fade = 1 - progress * 0.5;
 
-      ctx.save(); ctx.translate(s.player.x, s.player.y);
-      ctx.globalAlpha = 0.45 * (1-progress);
-      ctx.strokeStyle = colors.arc; ctx.lineWidth = 10; ctx.lineCap = "round";
-      ctx.shadowBlur = 25; ctx.shadowColor = colors.glow;
-      ctx.beginPath(); ctx.arc(0, 0, swordRange*0.85, startAngle, startAngle + arcHalf*2*progress); ctx.stroke();
+      ctx.save();
+      ctx.translate(s.player.x, s.player.y);
+
+      // Faded trail arc
+      ctx.globalAlpha = 0.35 * fade;
+      ctx.strokeStyle = colors.arc;
+      ctx.lineWidth = 12;
+      ctx.lineCap = "round";
+      ctx.shadowBlur = 18;
+      ctx.shadowColor = colors.glow;
+      ctx.beginPath();
+      if (dir === 1) ctx.arc(0, 0, swordRange * 0.8, startAng, currentAng, false);
+      else           ctx.arc(0, 0, swordRange * 0.8, startAng, currentAng, true);
+      ctx.stroke();
       ctx.shadowBlur = 0;
 
-      ctx.globalAlpha = 1 - progress*0.6;
-      ctx.strokeStyle = colors.blade; ctx.lineWidth = 3;
-      ctx.shadowBlur = 12; ctx.shadowColor = colors.glow;
-      const tipX = Math.cos(startAngle + arcHalf*2*progress) * swordRange;
-      const tipY = Math.sin(startAngle + arcHalf*2*progress) * swordRange;
-      ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(tipX, tipY); ctx.stroke();
-      ctx.shadowBlur = 0; ctx.globalAlpha = 1;
+      // Draw sword shape rotated to currentAng
+      ctx.globalAlpha = fade;
+      ctx.rotate(currentAng);
+
+      const bladeLen = swordRange - PLAYER_RADIUS - 2;
+      const baseX = PLAYER_RADIUS + 2;
+
+      // Glow behind blade
+      ctx.shadowBlur = 16;
+      ctx.shadowColor = colors.glow;
+
+      // Blade (tapered triangle shape)
+      ctx.beginPath();
+      ctx.moveTo(baseX + 12, -4);      // base left
+      ctx.lineTo(baseX + bladeLen, 0); // tip
+      ctx.lineTo(baseX + 12, 4);       // base right
+      ctx.closePath();
+      const bladeGrad = ctx.createLinearGradient(baseX + 12, 0, baseX + bladeLen, 0);
+      bladeGrad.addColorStop(0, colors.blade);
+      bladeGrad.addColorStop(1, "#ffffff");
+      ctx.fillStyle = bladeGrad;
+      ctx.fill();
+
+      // Blade edge highlight
+      ctx.strokeStyle = "#ffffff";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(baseX + 12, 0);
+      ctx.lineTo(baseX + bladeLen - 2, 0);
+      ctx.stroke();
+
+      ctx.shadowBlur = 0;
+
+      // Crossguard
+      ctx.fillStyle = "#9ca3af";
+      ctx.fillRect(baseX + 8, -8, 5, 16);
+      ctx.strokeStyle = "#d1d5db";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(baseX + 8, -8, 5, 16);
+
+      // Handle
+      ctx.fillStyle = "#78350f";
+      ctx.beginPath();
+      ctx.roundRect(baseX - 2, -3, 12, 6, 2);
+      ctx.fill();
+      ctx.strokeStyle = "#d97706";
+      ctx.lineWidth = 1;
+      ctx.stroke();
+
+      // Pommel
+      ctx.fillStyle = "#d4af37";
+      ctx.beginPath();
+      ctx.arc(baseX - 3, 0, 4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = "#fef3c7";
+      ctx.lineWidth = 1;
+      ctx.stroke();
+
+      ctx.globalAlpha = 1;
       ctx.restore();
     }
 
