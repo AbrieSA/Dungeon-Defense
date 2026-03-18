@@ -15,7 +15,6 @@ const ABILITY_LIST: { id: string; name: string; icon: string; desc: string; kill
   { id: "speed",           name: "Swift Feet",      icon: "💨", desc: "+50% movement speed",         killsRequired: 5  },
   { id: "wide_slash",      name: "Wide Slash",       icon: "⚔️",  desc: "Sword arc doubled",           killsRequired: 10 },
   { id: "fire_blade",      name: "Fire Blade",       icon: "🔥", desc: "Sword leaves burning fire",    killsRequired: 15 },
-  { id: "life_steal",      name: "Life Steal",       icon: "🩸", desc: "Every kill restores HP",       killsRequired: 20 },
   { id: "chain_lightning", name: "Chain Lightning",  icon: "⚡", desc: "Kills arc to nearby enemies",  killsRequired: 25 },
   { id: "giant_sword",     name: "Giant Sword",      icon: "🗡️",  desc: "+75% sword reach",            killsRequired: 30 },
   { id: "whirlwind",       name: "Whirlwind",        icon: "🌪️", desc: "Auto spin-attack every 3s",   killsRequired: 35 },
@@ -24,7 +23,6 @@ const ABILITY_LIST: { id: string; name: string; icon: string; desc: string; kill
   { id: "double_strike",   name: "Double Strike",    icon: "✌️",  desc: "Two swings per click",        killsRequired: 50 },
   { id: "iron_hide",       name: "Iron Hide",        icon: "🛡️",  desc: "2x invincibility time",       killsRequired: 55 },
   { id: "time_stop",       name: "Time Stop",        icon: "⏳", desc: "Kills freeze nearby mobs",    killsRequired: 60 },
-  { id: "vampiric",        name: "Vampiric Aura",    icon: "🧛", desc: "Heal 2 HP every 10 kills",    killsRequired: 70 },
   { id: "berserker",       name: "Berserker",        icon: "😤", desc: "Triple arc, 2x speed",        killsRequired: 80 },
 ];
 
@@ -307,11 +305,6 @@ export default function Game() {
       s.vampiricKillTrack += 1;
       grantAbility(s.score);
 
-      if (s.abilities.has("life_steal") && Math.random() < 0.5) {
-        s.hp = Math.min(s.maxHp, s.hp + 1);
-        s.damageNums.push({ x: s.player.x, y: s.player.y - 30, vy: -1.5, life: 50, text: "+1 HP", color: "#4ade80" });
-        setUiHp(s.hp);
-      }
       if (s.abilities.has("vampiric") && s.vampiricKillTrack >= 10) {
         s.vampiricKillTrack = 0;
         s.hp = Math.min(s.maxHp, s.hp + 2);
