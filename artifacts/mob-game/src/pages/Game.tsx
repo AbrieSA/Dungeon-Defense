@@ -2,12 +2,12 @@ import { useEffect, useRef, useState, useCallback } from "react";
 
 const CANVAS_WIDTH = 900;
 const CANVAS_HEIGHT = 650;
-const BASE_PLAYER_SPEED = 1.75;
+const BASE_PLAYER_SPEED = 1.25;
 const PLAYER_RADIUS = 16;
 const MOB_RADIUS = 14;
 const BASE_SWORD_RANGE = 80;
 const BASE_SWORD_ARC = Math.PI / 3;
-const MOB_SPEED_BASE = 0.6;
+const MOB_SPEED_BASE = 0.5;
 const MOB_SPAWN_INTERVAL = 1500;
 const JOYSTICK_MAX_DIST = 52;
 
@@ -32,7 +32,7 @@ interface Particle { x: number; y: number; vx: number; vy: number; life: number;
 interface DamageNumber { x: number; y: number; vy: number; life: number; text: string; color?: string; }
 interface FireTrail { x: number; y: number; life: number; maxLife: number; radius: number; }
 interface LightningBolt { x1: number; y1: number; x2: number; y2: number; life: number; }
-interface AbilityNotif { name: string; icon: string; desc: string; timer: number; }
+interface DraftChoice { id: string; name: string; icon: string; desc: string; }
 
 let mobIdCounter = 0;
 
@@ -59,12 +59,10 @@ export default function Game() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
-  // Joystick visual state for rendering
   const [joystickVis, setJoystickVis] = useState<{
     active: boolean; bx: number; by: number; tx: number; ty: number;
   }>({ active: false, bx: 0, by: 0, tx: 0, ty: 0 });
 
-  // Joystick internal tracking (not React state - no re-renders)
   const joystickRef = useRef({
     active: false,
     touchId: -1,
@@ -88,11 +86,15 @@ export default function Game() {
     lastSpawn: 0, spawnInterval: MOB_SPAWN_INTERVAL,
     wave: 1, waveTimer: 0, gameTime: 0, invincible: 0,
     abilities: new Set<string>(),
-    abilityNotif: null as AbilityNotif | null,
     whirlwindTimer: 0, vampiricKillTrack: 0,
     moving: false, playerVx: 0, playerVy: 0,
     swingDir: 1 as (1 | -1),
+    // Draft system
+    paused: false,
   });
+
+  // Draft UI state
+  const [draftChoices, setDraftChoices] = useState<DraftChoice[] | null>(null);
 
   const animRef = useRef<number>(0);
   const lastTimeRef = useRef<number>(0);
@@ -102,10 +104,8 @@ export default function Game() {
   const [uiDead, setUiDead] = useState(false);
   const [uiWave, setUiWave] = useState(1);
   const [uiAbilities, setUiAbilities] = useState<string[]>([]);
-  const [uiNotif, setUiNotif] = useState<AbilityNotif | null>(null);
   const [scale, setScale] = useState(1);
 
-  // Responsive scaling
   useEffect(() => {
     function updateScale() {
       const maxW = window.innerWidth - 16;
@@ -129,30 +129,37 @@ export default function Game() {
       lastSpawn: 0, spawnInterval: MOB_SPAWN_INTERVAL,
       wave: 1, waveTimer: 0, gameTime: 0, invincible: 0,
       abilities: new Set<string>(),
-      abilityNotif: null, whirlwindTimer: 0, vampiricKillTrack: 0, moving: false,
+      whirlwindTimer: 0, vampiricKillTrack: 0, moving: false,
       swingDir: 1 as (1 | -1),
+      paused: false,
     });
     joystickRef.current = { active: false, touchId: -1, screenBX: 0, screenBY: 0, dx: 0, dy: 0 };
     mobIdCounter = 0;
     setUiScore(0); setUiHp(5); setUiMaxHp(5); setUiDead(false); setUiWave(1);
-    setUiAbilities([]); setUiNotif(null);
+    setUiAbilities([]); setDraftChoices(null);
     setJoystickVis({ active: false, bx: 0, by: 0, tx: 0, ty: 0 });
+  }, []);
+
+  // Called when player picks an ability from the draft
+  const chooseDraftAbility = useCallback((id: string) => {
+    const s = stateRef.current;
+    s.abilities.add(id);
+    s.paused = false;
+    setUiAbilities([...s.abilities]);
+    setDraftChoices(null);
   }, []);
 
   function triggerSwing(angle: number, phase: number) {
     const s = stateRef.current;
     const dur = s.abilities.has("swift_strikes") ? 160 : 300;
-    // Flip direction each swing (phase 0 only — double-strike follows same dir)
     if (phase === 0) s.swingDir = s.swingDir === 1 ? -1 : 1;
     s.sword = { angle, progress: 0, duration: dur, hitIds: new Set(), phase, dir: s.swingDir };
   }
 
-  // Touch + mouse event wiring
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    // Helper: convert screen coords → canvas game coords
     function screenToCanvas(cx: number, cy: number) {
       const rect = canvas.getBoundingClientRect();
       return {
@@ -161,7 +168,6 @@ export default function Game() {
       };
     }
 
-    // ---- KEYBOARD ----
     const handleKeyDown = (e: KeyboardEvent) => {
       stateRef.current.keys.add(e.key.toLowerCase());
       if (["arrowup","arrowdown","arrowleft","arrowright","w","a","s","d"," "].includes(e.key.toLowerCase()))
@@ -169,10 +175,9 @@ export default function Game() {
     };
     const handleKeyUp = (e: KeyboardEvent) => stateRef.current.keys.delete(e.key.toLowerCase());
 
-    // ---- MOUSE ----
     const handleMouseDown = (e: MouseEvent) => {
       const s = stateRef.current;
-      if (s.dead) return;
+      if (s.dead || s.paused) return;
       const { gx, gy } = screenToCanvas(e.clientX, e.clientY);
       const dx = gx - s.player.x, dy = gy - s.player.y;
       const angle = Math.atan2(dy, dx);
@@ -181,11 +186,10 @@ export default function Game() {
       else s.pendingSwing = true;
     };
 
-    // ---- TOUCH ----
     const handleTouchStart = (e: TouchEvent) => {
       e.preventDefault();
       const s = stateRef.current;
-      if (s.dead) return;
+      if (s.dead || s.paused) return;
       const rect = canvas.getBoundingClientRect();
       const halfScreen = rect.left + rect.width / 2;
 
@@ -194,7 +198,6 @@ export default function Game() {
         const isLeftSide = t.clientX < halfScreen;
 
         if (isLeftSide && !joystickRef.current.active) {
-          // Start joystick
           joystickRef.current.active = true;
           joystickRef.current.touchId = t.identifier;
           joystickRef.current.screenBX = t.clientX;
@@ -203,17 +206,14 @@ export default function Game() {
           joystickRef.current.dy = 0;
           setJoystickVis({ active: true, bx: t.clientX, by: t.clientY, tx: t.clientX, ty: t.clientY });
         } else if (!isLeftSide) {
-          // Right side = sword swing toward nearest enemy or current facing
           const { gx, gy } = screenToCanvas(t.clientX, t.clientY);
           let angle = s.playerFacing;
-          // Find closest mob to swing toward
           let closest = Infinity;
           s.mobs.forEach(mob => {
             if (mob.dying) return;
             const d = Math.hypot(mob.x - s.player.x, mob.y - s.player.y);
             if (d < closest) { closest = d; angle = Math.atan2(mob.y - s.player.y, mob.x - s.player.x); }
           });
-          // If tapped far from player use tap direction
           const tapDx = gx - s.player.x, tapDy = gy - s.player.y;
           if (Math.hypot(tapDx, tapDy) > 30) angle = Math.atan2(tapDy, tapDx);
           s.playerFacing = angle;
@@ -289,21 +289,30 @@ export default function Game() {
       }
     }
 
-    function grantAbility(kills: number) {
+    // Triggers the draft: picks 2 random abilities the player doesn't have yet
+    function triggerDraft() {
       const s = stateRef.current;
-      const toGrant = ABILITY_LIST.find(a => a.killsRequired === kills && !s.abilities.has(a.id));
-      if (!toGrant) return;
-      s.abilities.add(toGrant.id);
-      s.abilityNotif = { name: toGrant.name, icon: toGrant.icon, desc: toGrant.desc, timer: 3000 };
-      setUiAbilities([...s.abilities]);
-      setUiNotif(s.abilityNotif);
+      const available = ABILITY_LIST.filter(a => !s.abilities.has(a.id));
+      if (available.length === 0) return; // all abilities already owned
+      // Shuffle and pick 2
+      const shuffled = [...available].sort(() => Math.random() - 0.5);
+      const choices = shuffled.slice(0, Math.min(2, shuffled.length));
+      s.paused = true;
+      setDraftChoices(choices.map(c => ({ id: c.id, name: c.name, icon: c.icon, desc: c.desc })));
     }
 
     function onMobKill(mob: Mob) {
       const s = stateRef.current;
       s.score += 1;
       s.vampiricKillTrack += 1;
-      grantAbility(s.score);
+
+      // Check if this kill hits a milestone
+      const milestone = ABILITY_LIST.find(a => a.killsRequired === s.score && !s.abilities.has(a.id));
+      if (milestone) {
+        triggerDraft();
+      }
+
+      setUiScore(s.score);
 
       if (s.abilities.has("chain_lightning")) {
         const nearby = s.mobs.filter(m => !m.dying && m.id !== mob.id)
@@ -337,7 +346,6 @@ export default function Game() {
           }
         });
       }
-      setUiScore(s.score);
     }
 
     function processSwordHits(s: typeof stateRef.current) {
@@ -347,7 +355,6 @@ export default function Game() {
       let arcHalf = BASE_SWORD_ARC;
       if (s.abilities.has("wide_slash")) arcHalf *= 2;
       if (s.abilities.has("berserker")) arcHalf *= 1.5;
-      // dir: 1 = swing left-to-right (angle-arcHalf → angle+arcHalf), -1 = opposite
       const currentAngle = dir === 1
         ? (angle - arcHalf) + progress * arcHalf * 2
         : (angle + arcHalf) - progress * arcHalf * 2;
@@ -381,11 +388,11 @@ export default function Game() {
       const s = stateRef.current;
       const j = joystickRef.current;
 
-      if (!s.dead) {
+      // If paused (draft screen open), only draw — no game logic
+      if (!s.dead && !s.paused) {
         s.gameTime += dt;
         s.invincible = Math.max(0, s.invincible - dt);
 
-        // Whirlwind
         if (s.abilities.has("whirlwind")) {
           s.whirlwindTimer -= dt;
           if (s.whirlwindTimer <= 0) {
@@ -406,13 +413,11 @@ export default function Game() {
           }
         }
 
-        // Movement — keyboard OR joystick
         let dx = 0, dy = 0;
         if (s.keys.has("a") || s.keys.has("arrowleft")) dx -= 1;
         if (s.keys.has("d") || s.keys.has("arrowright")) dx += 1;
         if (s.keys.has("w") || s.keys.has("arrowup")) dy -= 1;
         if (s.keys.has("s") || s.keys.has("arrowdown")) dy += 1;
-        // Joystick overrides keyboard if active
         if (j.active) { dx = j.dx; dy = j.dy; }
         if (dx !== 0 && dy !== 0 && !j.active) { dx *= 0.707; dy *= 0.707; }
 
@@ -429,7 +434,6 @@ export default function Game() {
         s.player.x = Math.max(PLAYER_RADIUS+2, Math.min(CANVAS_WIDTH-PLAYER_RADIUS-2, s.player.x + dx * speed));
         s.player.y = Math.max(PLAYER_RADIUS+2, Math.min(CANVAS_HEIGHT-PLAYER_RADIUS-2, s.player.y + dy * speed));
 
-        // Sword
         if (s.sword !== null) {
           s.sword.progress += dt / s.sword.duration;
           processSwordHits(s);
@@ -445,7 +449,6 @@ export default function Game() {
           }
         }
 
-        // Wave
         s.waveTimer += dt;
         if (s.waveTimer > 15000) {
           s.wave += 1; s.waveTimer = 0;
@@ -453,14 +456,12 @@ export default function Game() {
           setUiWave(s.wave);
         }
 
-        // Spawn
         if (timestamp - s.lastSpawn > s.spawnInterval) {
           s.lastSpawn = timestamp;
           const count = 1 + Math.floor(s.wave/3);
           for (let i = 0; i < count; i++) s.mobs.push(spawnMob(s.score));
         }
 
-        // Fire trails
         s.fireTrails.forEach(fire => {
           if (Math.random() < 0.3) {
             s.mobs.forEach(mob => {
@@ -475,7 +476,6 @@ export default function Game() {
         });
         s.fireTrails = s.fireTrails.filter(f => f.life > 0);
 
-        // Mob movement
         const mobSpeed = MOB_SPEED_BASE + s.wave * 0.04;
         s.mobs.forEach(mob => {
           if (mob.dying) { mob.dyingTimer += dt; return; }
@@ -499,11 +499,6 @@ export default function Game() {
         s.damageNums = s.damageNums.filter(d => d.life > 0);
         s.lightningBolts.forEach(b => { b.life-=1; });
         s.lightningBolts = s.lightningBolts.filter(b => b.life > 0);
-
-        if (s.abilityNotif) {
-          s.abilityNotif.timer -= dt;
-          if (s.abilityNotif.timer <= 0) { s.abilityNotif = null; setUiNotif(null); }
-        }
       }
 
       drawGame(ctx, s, timestamp);
@@ -514,7 +509,7 @@ export default function Game() {
     return () => cancelAnimationFrame(animRef.current);
   }, []);
 
-  // ─── DRAWING HELPERS ─────────────────────────────────────────────────────
+  // ─── DRAWING ──────────────────────────────────────────────────────────────
   function getSwordColors(abilities: Set<string>) {
     if (abilities.has("berserker"))       return { blade: "#ff0080", glow: "#ff0080", arc: "#ff00ff" };
     if (abilities.has("fire_blade"))      return { blade: "#fb923c", glow: "#f97316", arc: "#fbbf24" };
@@ -553,27 +548,22 @@ export default function Game() {
     ctx.rotate(facing + Math.PI / 2);
     const ls = Math.sin(legAnim) * 5;
 
-    // Shadow
     ctx.fillStyle = "rgba(0,0,0,0.3)";
     ctx.beginPath(); ctx.ellipse(0, 4, 12, 6, 0, 0, Math.PI*2); ctx.fill();
 
-    // Legs
     ctx.strokeStyle = "#374151"; ctx.lineWidth = 5; ctx.lineCap = "round";
     ctx.beginPath(); ctx.moveTo(-4, 4); ctx.lineTo(-5 - ls*0.4, 14); ctx.stroke();
     ctx.beginPath(); ctx.moveTo(4, 4); ctx.lineTo(5 + ls*0.4, 14); ctx.stroke();
 
-    // Shoes
     ctx.fillStyle = "#1f2937";
     ctx.beginPath(); ctx.ellipse(-5 - ls*0.4, 15, 4, 3, -0.3, 0, Math.PI*2); ctx.fill();
     ctx.beginPath(); ctx.ellipse(5 + ls*0.4, 15, 4, 3, 0.3, 0, Math.PI*2); ctx.fill();
 
-    // Body
     ctx.fillStyle = abilities.has("berserker") ? "#dc2626" : abilities.has("fire_blade") ? "#b45309" : "#1d4ed8";
     ctx.strokeStyle = abilities.has("berserker") ? "#fca5a5" : abilities.has("fire_blade") ? "#fbbf24" : "#bfdbfe";
     ctx.lineWidth = 1.5;
     ctx.beginPath(); ctx.roundRect(-7, -4, 14, 16, 3); ctx.fill(); ctx.stroke();
 
-    // Arms
     ctx.strokeStyle = "#92400e"; ctx.lineWidth = 5;
     ctx.beginPath(); ctx.moveTo(-7, 2); ctx.lineTo(-14, 8 + ls*0.3); ctx.stroke();
     ctx.beginPath(); ctx.moveTo(7, 2); ctx.lineTo(14, 8 - ls*0.3); ctx.stroke();
@@ -581,15 +571,12 @@ export default function Game() {
     ctx.beginPath(); ctx.arc(-14, 8 + ls*0.3, 3.5, 0, Math.PI*2); ctx.fill();
     ctx.beginPath(); ctx.arc(14, 8 - ls*0.3, 3.5, 0, Math.PI*2); ctx.fill();
 
-    // Head
     ctx.fillStyle = "#fcd9a8"; ctx.strokeStyle = "#d97706"; ctx.lineWidth = 1.5;
     ctx.beginPath(); ctx.arc(0, -8, 9, 0, Math.PI*2); ctx.fill(); ctx.stroke();
 
-    // Hair
     ctx.fillStyle = "#78350f";
     ctx.beginPath(); ctx.ellipse(0, -14, 7, 4, 0, 0, Math.PI*2); ctx.fill();
 
-    // Eyes
     ctx.fillStyle = "#1f2937";
     ctx.beginPath(); ctx.arc(-3, -8, 1.5, 0, Math.PI*2); ctx.fill();
     ctx.beginPath(); ctx.arc(3, -8, 1.5, 0, Math.PI*2); ctx.fill();
@@ -689,7 +676,6 @@ export default function Game() {
       ctx.save();
       ctx.translate(s.player.x, s.player.y);
 
-      // Faded trail arc
       ctx.globalAlpha = 0.35 * fade;
       ctx.strokeStyle = colors.arc;
       ctx.lineWidth = 12;
@@ -702,22 +688,19 @@ export default function Game() {
       ctx.stroke();
       ctx.shadowBlur = 0;
 
-      // Draw sword shape rotated to currentAng
       ctx.globalAlpha = fade;
       ctx.rotate(currentAng);
 
       const bladeLen = swordRange - PLAYER_RADIUS - 2;
       const baseX = PLAYER_RADIUS + 2;
 
-      // Glow behind blade
       ctx.shadowBlur = 16;
       ctx.shadowColor = colors.glow;
 
-      // Blade (tapered triangle shape)
       ctx.beginPath();
-      ctx.moveTo(baseX + 12, -4);      // base left
-      ctx.lineTo(baseX + bladeLen, 0); // tip
-      ctx.lineTo(baseX + 12, 4);       // base right
+      ctx.moveTo(baseX + 12, -4);
+      ctx.lineTo(baseX + bladeLen, 0);
+      ctx.lineTo(baseX + 12, 4);
       ctx.closePath();
       const bladeGrad = ctx.createLinearGradient(baseX + 12, 0, baseX + bladeLen, 0);
       bladeGrad.addColorStop(0, colors.blade);
@@ -725,7 +708,6 @@ export default function Game() {
       ctx.fillStyle = bladeGrad;
       ctx.fill();
 
-      // Blade edge highlight
       ctx.strokeStyle = "#ffffff";
       ctx.lineWidth = 1;
       ctx.beginPath();
@@ -735,14 +717,12 @@ export default function Game() {
 
       ctx.shadowBlur = 0;
 
-      // Crossguard
       ctx.fillStyle = "#9ca3af";
       ctx.fillRect(baseX + 8, -8, 5, 16);
       ctx.strokeStyle = "#d1d5db";
       ctx.lineWidth = 1;
       ctx.strokeRect(baseX + 8, -8, 5, 16);
 
-      // Handle
       ctx.fillStyle = "#78350f";
       ctx.beginPath();
       ctx.roundRect(baseX - 2, -3, 12, 6, 2);
@@ -751,7 +731,6 @@ export default function Game() {
       ctx.lineWidth = 1;
       ctx.stroke();
 
-      // Pommel
       ctx.fillStyle = "#d4af37";
       ctx.beginPath();
       ctx.arc(baseX - 3, 0, 4, 0, Math.PI * 2);
@@ -774,10 +753,22 @@ export default function Game() {
     });
     ctx.globalAlpha = 1; ctx.textAlign = "left";
 
-    if (s.dead) { ctx.fillStyle = "rgba(0,0,0,0.65)"; ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT); }
+    // Draw paused overlay on canvas
+    if (s.paused && !s.dead) {
+      ctx.fillStyle = "rgba(0,0,0,0.55)";
+      ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+    }
+
+    if (s.dead) {
+      ctx.fillStyle = "rgba(0,0,0,0.65)";
+      ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+    }
   }
 
   const abilityMeta = ABILITY_LIST.reduce<Record<string, typeof ABILITY_LIST[0]>>((acc, a) => { acc[a.id] = a; return acc; }, {});
+
+  // Next milestone
+  const nextMilestone = ABILITY_LIST.find(a => !uiAbilities.includes(a.id));
 
   return (
     <div className="flex flex-col items-center justify-center min-h-screen bg-gray-950 select-none overflow-hidden">
@@ -802,7 +793,7 @@ export default function Game() {
         <div className="flex items-center gap-1">
           <span className="text-gray-400 text-xs font-mono">NEXT</span>
           <span className="text-green-400 font-bold text-xs font-mono">
-            {(() => { const next = ABILITY_LIST.find(a => !uiAbilities.includes(a.id)); return next ? `${next.icon}@${next.killsRequired}` : "MAX"; })()}
+            {nextMilestone ? `@${nextMilestone.killsRequired}` : "MAX"}
           </span>
         </div>
       </div>
@@ -823,7 +814,7 @@ export default function Game() {
         </div>
       )}
 
-      {/* Canvas + Touch controls */}
+      {/* Canvas */}
       <div
         ref={containerRef}
         className="relative"
@@ -837,48 +828,66 @@ export default function Game() {
           style={{ width: CANVAS_WIDTH * scale, height: CANVAS_HEIGHT * scale }}
         />
 
-        {/* Virtual joystick overlay */}
+        {/* Virtual joystick */}
         {joystickVis.active && (
           <>
-            {/* Outer ring */}
             <div
               className="absolute pointer-events-none rounded-full border-2 border-white/30 bg-white/5"
               style={{
-                width: JOYSTICK_MAX_DIST * 2,
-                height: JOYSTICK_MAX_DIST * 2,
-                left: joystickVis.bx - JOYSTICK_MAX_DIST,
-                top: joystickVis.by - JOYSTICK_MAX_DIST,
+                width: JOYSTICK_MAX_DIST * 2, height: JOYSTICK_MAX_DIST * 2,
+                left: joystickVis.bx - JOYSTICK_MAX_DIST, top: joystickVis.by - JOYSTICK_MAX_DIST,
                 position: "fixed",
               }}
             />
-            {/* Thumb */}
             <div
               className="absolute pointer-events-none rounded-full bg-white/40 border-2 border-white/60"
               style={{
-                width: 44,
-                height: 44,
-                left: joystickVis.tx - 22,
-                top: joystickVis.ty - 22,
+                width: 44, height: 44,
+                left: joystickVis.tx - 22, top: joystickVis.ty - 22,
                 position: "fixed",
               }}
             />
           </>
         )}
 
-        {/* Ability unlock notification */}
-        {uiNotif && (
-          <div className="absolute top-3 left-1/2 -translate-x-1/2 pointer-events-none z-10">
-            <div className="bg-gray-900 border-2 border-yellow-400 rounded-xl px-4 py-2 text-center shadow-lg shadow-yellow-500/30">
-              <div className="text-2xl mb-0.5">{uiNotif.icon}</div>
-              <div className="text-yellow-300 font-bold font-mono text-sm">{uiNotif.name} UNLOCKED!</div>
-              <div className="text-gray-300 text-xs font-mono">{uiNotif.desc}</div>
+        {/* ── ABILITY DRAFT OVERLAY ── */}
+        {draftChoices && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center z-20 pointer-events-auto">
+            {/* Header */}
+            <div className="mb-4 text-center">
+              <div className="text-yellow-400 font-mono font-bold text-xl tracking-widest drop-shadow">
+                ⚔️ CHOOSE AN ABILITY
+              </div>
+              <div className="text-gray-400 font-mono text-xs mt-1">{uiScore} kills</div>
+            </div>
+
+            {/* Buttons */}
+            <div className="flex gap-4 flex-wrap justify-center px-4">
+              {draftChoices.map(choice => (
+                <button
+                  key={choice.id}
+                  onClick={() => chooseDraftAbility(choice.id)}
+                  className="
+                    group flex flex-col items-center gap-2 px-6 py-4
+                    bg-gray-900 border-2 border-gray-600
+                    hover:border-yellow-400 hover:bg-gray-800
+                    rounded-xl font-mono transition-all duration-150
+                    min-w-[140px] shadow-lg
+                    active:scale-95
+                  "
+                >
+                  <span className="text-4xl">{choice.icon}</span>
+                  <span className="text-white font-bold text-sm text-center leading-tight">{choice.name}</span>
+                  <span className="text-gray-400 text-xs text-center leading-snug">{choice.desc}</span>
+                </button>
+              ))}
             </div>
           </div>
         )}
 
         {/* Death screen */}
         {uiDead && (
-          <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
+          <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none z-30">
             <div className="text-center pointer-events-auto">
               <h2 className="text-4xl font-bold text-red-500 mb-2 font-mono tracking-widest drop-shadow-lg">YOU DIED</h2>
               <p className="text-yellow-400 text-lg font-mono mb-1">Kills: {uiScore}</p>
@@ -903,7 +912,7 @@ export default function Game() {
         <span className="hidden sm:inline">CLICK — Swing sword</span>
         <span className="sm:hidden">Left side — Joystick</span>
         <span className="sm:hidden">Right side — Attack</span>
-        <span>Ability every 5 kills!</span>
+        <span>Choose an ability every milestone!</span>
       </div>
     </div>
   );
